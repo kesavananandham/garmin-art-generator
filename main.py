@@ -1,22 +1,32 @@
-
 import base64
 import io
 import os
+import tarfile
 from contextlib import asynccontextmanager
+from enum import Enum
+
 import dotenv
-from fastapi import FastAPI, HTTPException, UploadFile
+import httpx
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from garminconnect import Garmin
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
-import tarfile
 
 dotenv.load_dotenv()
 
 # Global Garmin client instance
 garmin_client = None
-# TOKEN_DIR = os.path.expanduser("~/.garmin_tokens")
-
 TOKEN_DIR = "/tmp/garmin_tokens"
+
+# Dynamic Picsum Nature Background Endpoint
+DYNAMIC_NATURE_URL2 = "https://picsum.photos/1080/1920"
+DYNAMIC_NATURE_URL = "https://loremflickr.com/1080/1920/nature,landscape/all"
+
+
+class TemplateType(str, Enum):
+    glassmorphism = "glassmorphism"
+    minimal_left = "minimal_left"
+    zone2 = "zone2"
 
 
 def restore_tokens_from_env():
@@ -47,6 +57,7 @@ def restore_tokens_from_env():
         print(f"⚠️ Failed to restore tokens from env: {e}")
         return False
 
+
 def get_garmin_client():
     """Initializes Garmin connection using cached tokens if available."""
     email = os.getenv("GARMIN_EMAIL")
@@ -59,7 +70,6 @@ def get_garmin_client():
 
     client = Garmin(email, password, is_cn=False)
 
-    # Automatically unpack tokens from env if the token directory is missing/empty
     if not os.path.exists(TOKEN_DIR) or not os.listdir(TOKEN_DIR):
         restore_tokens_from_env()
 
@@ -83,6 +93,303 @@ def get_garmin_client():
     return client
 
 
+def create_vertical_gradient(
+        width: int,
+        height: int,
+        top_color: tuple[int, int, int, int],
+        bottom_color: tuple[int, int, int, int],
+) -> Image.Image:
+    """Generates a vertical gradient overlay."""
+    base = Image.new("RGBA", (width, height))
+    draw = ImageDraw.Draw(base)
+    for y in range(height):
+        t = y / float(height)
+        r = int(top_color[0] + (bottom_color[0] - top_color[0]) * t)
+        g = int(top_color[1] + (bottom_color[1] - top_color[1]) * t)
+        b = int(top_color[2] + (bottom_color[2] - top_color[2]) * t)
+        a = int(top_color[3] + (bottom_color[3] - top_color[3]) * t)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, a))
+    return base
+
+
+def format_seconds_to_mmss(seconds: float | int) -> str:
+    """Formats total seconds into MM:SS or HH:MM:SS string."""
+    total_sec = int(seconds)
+    hours = total_sec // 3600
+    minutes = (total_sec % 3600) // 60
+    secs = total_sec % 60
+
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def safe_get_zone_seconds(z: dict) -> float:
+    """Helper function to extract zone time from various Garmin API structures."""
+    if not isinstance(z, dict):
+        return 0.0
+    for key in [
+        "secsInZone",
+        "durationInZoneSecs",
+        "secs",
+        "timeInZone",
+        "zoneTime",
+    ]:
+        if key in z and z[key] is not None:
+            try:
+                return float(z[key])
+            except (ValueError, TypeError):
+                pass
+    return 0.0
+
+
+def render_zone2_garmin_style_template(
+        base_img: Image.Image,
+        current: dict,
+        last: dict | None,
+        hr_zones: list,
+        user_avatar: Image.Image | None = None,
+) -> Image.Image:
+    target_w, target_h = 1080, 1920
+
+    # 1. Base Canvas (Dynamic Landscape Background)
+    bg = ImageOps.fit(base_img, (target_w, target_h), Image.Resampling.LANCZOS)
+
+    gradient_overlay = create_vertical_gradient(
+        target_w,
+        target_h,
+        top_color=(10, 12, 16, 60),
+        bottom_color=(5, 7, 10, 120),
+    )
+
+    canvas = Image.alpha_composite(bg.convert("RGBA"), gradient_overlay)
+
+    # 2. Transparent Overlay Layer
+    overlay = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # Fonts
+    try:
+        font_title = ImageFont.truetype("Helvetica", size=36)
+        font_huge = ImageFont.truetype("Helvetica", size=60)
+        font_large_val = ImageFont.truetype("Helvetica", size=52)
+        font_med = ImageFont.truetype("Helvetica", size=28)
+        font_small = ImageFont.truetype("Helvetica", size=22)
+    except Exception:
+        font_title = font_huge = font_large_val = font_med = font_small = (
+            ImageFont.load_default()
+        )
+
+    # Metrics
+    activity_name = current.get("activityName", "Running")
+    distance_km = f"{round(current.get('distance', 0) / 1000, 2)} km"
+    duration_sec = current.get("duration", 3816)
+    dur_str = format_seconds_to_mmss(duration_sec)
+
+    avg_speed = current.get("averageSpeed", 0)
+    pace_str = "-- /km"
+    if avg_speed > 0:
+        sec = 1000 / avg_speed
+        pace_str = f"{int(sec // 60)}:{int(sec % 60):02d} /km"
+
+    avg_hr = (
+        f"{int(current.get('averageHR', 0))}"
+        if current.get("averageHR")
+        else "--"
+    )
+    max_hr = (
+        f"{int(current.get('maxHR', 0))}" if current.get("maxHR") else "--"
+    )
+
+    card_bg = (12, 14, 18, 150)
+    card_border = (255, 255, 255, 70)
+
+    text_primary = (255, 255, 255, 255)
+    text_secondary = (200, 210, 225, 255)
+
+    # =============================================================
+    # SECTION 1: TOP CARD
+    # =============================================================
+    draw.rounded_rectangle(
+        [(40, 60), (target_w - 40, 380)],
+        radius=20,
+        fill=card_bg,
+        outline=card_border,
+        width=2,
+    )
+    draw.text((80, 95), activity_name, fill=text_secondary, font=font_title)
+
+    # --- PERSONA AVATAR BADGE ---
+    avatar_size = 100
+    avatar_x, avatar_y = 80, 165
+
+    if user_avatar is not None:
+        # Crop uploaded persona photo into a round avatar
+        avatar_crop = ImageOps.fit(
+            user_avatar, (avatar_size, avatar_size), Image.Resampling.LANCZOS
+        )
+        mask = Image.new("L", (avatar_size, avatar_size), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+
+        overlay.paste(avatar_crop, (avatar_x, avatar_y), mask)
+        draw.ellipse(
+            [(avatar_x, avatar_y), (avatar_x + avatar_size, avatar_y + avatar_size)],
+            outline=(255, 255, 255, 220),
+            width=3,
+        )
+    else:
+        # Fallback runner badge icon if no custom photo was uploaded
+        icon_box = [(avatar_x, avatar_y), (avatar_x + avatar_size, avatar_y + avatar_size)]
+        draw.ellipse(icon_box, fill=(255, 255, 255, 30), outline=(255, 255, 255, 120), width=2)
+
+        accent_color = (245, 130, 32, 255)
+        # Runner Silhouette
+        draw.ellipse([(123, 180), (137, 194)], fill=accent_color)
+        draw.line([(130, 195), (122, 220)], fill=accent_color, width=5)
+        draw.line([(130, 202), (142, 212)], fill=accent_color, width=4)
+        draw.line([(130, 202), (118, 208)], fill=accent_color, width=4)
+        draw.line([(122, 220), (138, 242)], fill=accent_color, width=5)
+        draw.line([(122, 220), (110, 238)], fill=accent_color, width=5)
+
+    # Metrics
+    draw.text((210, 175), distance_km, fill=text_primary, font=font_huge)
+    draw.text(
+        (210, 270), f"{dur_str} • {pace_str}", fill=text_secondary, font=font_med
+    )
+
+    # =============================================================
+    # SECTION 2: MID CARD
+    # =============================================================
+    draw.rounded_rectangle(
+        [(40, 410), (target_w - 40, 680)],
+        radius=20,
+        fill=card_bg,
+        outline=card_border,
+        width=2,
+    )
+    draw.text((80, 450), f"{avg_hr} bpm", fill=text_primary, font=font_large_val)
+    draw.text((80, 530), "Average", fill=text_secondary, font=font_med)
+
+    draw.text(
+        (560, 450), f"{max_hr} bpm", fill=text_primary, font=font_large_val
+    )
+    draw.text((560, 530), "Maximum", fill=text_secondary, font=font_med)
+
+    # =============================================================
+    # SECTION 3: BOTTOM CARD (HR ZONES)
+    # =============================================================
+    draw.rounded_rectangle(
+        [(40, 710), (target_w - 40, 1840)],
+        radius=20,
+        fill=card_bg,
+        outline=card_border,
+        width=2,
+    )
+
+    if not isinstance(hr_zones, list) or len(hr_zones) == 0:
+        parsed_zones = [
+            {"zoneNumber": 1, "secsInZone": 718, "zoneLowBoundary": 121, "zoneHighBoundary": 134},
+            {"zoneNumber": 2, "secsInZone": 2729, "zoneLowBoundary": 135, "zoneHighBoundary": 149},
+            {"zoneNumber": 3, "secsInZone": 186, "zoneLowBoundary": 150, "zoneHighBoundary": 163},
+            {"zoneNumber": 4, "secsInZone": 0, "zoneLowBoundary": 164, "zoneHighBoundary": 178},
+            {"zoneNumber": 5, "secsInZone": 0, "zoneLowBoundary": 178, "zoneHighBoundary": 0},
+        ]
+    else:
+        parsed_zones = hr_zones
+
+    total_secs = sum(safe_get_zone_seconds(z) for z in parsed_zones) or 1.0
+
+    zone_names = {
+        1: "Warm Up",
+        2: "Easy",
+        3: "Aerobic",
+        4: "Threshold",
+        5: "Maximum",
+    }
+    zone_colors = {
+        1: (240, 245, 250, 230),
+        2: (41, 121, 255, 230),
+        3: (56, 142, 60, 230),
+        4: (245, 124, 0, 230),
+        5: (211, 47, 47, 230),
+    }
+
+    zone_map = {}
+    for idx, z in enumerate(parsed_zones):
+        z_num = z.get("zoneNumber", idx + 1) if isinstance(z, dict) else idx + 1
+        zone_map[z_num] = z
+
+    curr_y = 760
+
+    # Zone 5 -> Zone 1
+    for z_num in range(5, 0, -1):
+        z = zone_map.get(z_num, {})
+
+        secs = safe_get_zone_seconds(z)
+        pct = int(round((secs / total_secs) * 100)) if total_secs > 0 else 0
+        z_time_str = format_seconds_to_mmss(secs)
+
+        low_hr = z.get("zoneLowBoundary", z.get("lowHR", z.get("low", "")))
+        high_hr = z.get("zoneHighBoundary", z.get("highHR", z.get("high", "")))
+        z_desc = zone_names.get(z_num, "")
+
+        if z_num == 5:
+            range_str = f"> {int(low_hr)} bpm • {z_desc}" if low_hr else z_desc
+        elif low_hr and high_hr and int(high_hr) > 0:
+            range_str = f"{int(low_hr)} - {int(high_hr)} bpm • {z_desc}"
+        elif low_hr:
+            range_str = f">{int(low_hr)} bpm • {z_desc}"
+        else:
+            range_str = z_desc
+
+        draw.text(
+            (80, curr_y), f"Zone {z_num}", fill=text_primary, font=font_med
+        )
+        draw.text(
+            (210, curr_y + 4),
+            range_str,
+            fill=text_secondary,
+            font=font_small,
+        )
+
+        draw.text(
+            (target_w - 200, curr_y + 2),
+            z_time_str,
+            fill=text_primary,
+            font=font_med,
+            anchor="ra",
+        )
+        draw.text(
+            (target_w - 80, curr_y + 2),
+            f"{pct}%",
+            fill=text_primary,
+            font=font_med,
+            anchor="ra",
+        )
+
+        bar_y = curr_y + 50
+        bar_w = target_w - 160
+        draw.rounded_rectangle(
+            [(80, bar_y), (80 + bar_w, bar_y + 20)],
+            radius=10,
+            fill=(255, 255, 255, 40),
+        )
+
+        fill_w = int(bar_w * (secs / total_secs))
+        if fill_w > 0:
+            draw.rounded_rectangle(
+                [(80, bar_y), (80 + max(fill_w, 16), bar_y + 20)],
+                radius=10,
+                fill=zone_colors.get(z_num, (255, 255, 255, 230)),
+            )
+
+        curr_y += 130
+
+    final_img = Image.alpha_composite(canvas, overlay)
+    return final_img.convert("RGB")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global garmin_client
@@ -96,132 +403,102 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Garmin Card Generator API", lifespan=lifespan)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
-    return {
-        "status": "ok",
-        "garmin_connected": garmin_client is not None,
-    }
+    return {"status": "ok", "garmin_connected": garmin_client is not None}
 
 
 @app.post("/generate")
-async def generate_card(file: UploadFile):
+async def generate_card(
+        file: UploadFile | None = File(
+            None, description="Optional custom profile/persona image file"
+        ),
+        template: TemplateType = Query(
+            default=TemplateType.glassmorphism,
+            description="Card layout template",
+        ),
+):
     global garmin_client
 
-    # Ensure client is connected; retry login if it was down
     if garmin_client is None:
         try:
             garmin_client = get_garmin_client()
         except Exception:
             raise HTTPException(
                 status_code=503,
-                detail="Garmin service unavailable (Cloudflare/Auth error). Try again later.",
+                detail="Garmin service unavailable. Try again later.",
             )
 
-    # 1. Fetch Garmin Data using existing session
+    # 1. Fetch Garmin Activities
     try:
-        latest = garmin_client.get_activities(0, 1)[0]
+        activities = garmin_client.get_activities(0, 2)
     except Exception as e:
         print(f"🔄 Session expired, re-authenticating... ({e})")
         garmin_client = get_garmin_client()
-        latest = garmin_client.get_activities(0, 1)[0]
+        activities = garmin_client.get_activities(0, 2)
 
-    distance_km = f"{round(latest.get('distance', 0) / 1000, 2)}"
-    avg_hr = (
-        f"{int(latest.get('averageHR', 0))}" if latest.get("averageHR") else "--"
-    )
+    current_run = activities[0]
+    last_run = activities[1] if len(activities) > 1 else None
 
-    avg_speed = latest.get("averageSpeed", 0)
-    pace_str = "--"
-    if avg_speed > 0:
-        sec = 1000 / avg_speed
-        pace_str = f"{int(sec // 60)}:{int(sec % 60):02d}"
+    # Fetch HR Zones via get_activity_hr_in_time_zones
+    hr_zones_data = []
+    if template == TemplateType.zone2:
+        try:
+            hr_zones_data = garmin_client.get_activity_hr_in_time_zones(
+                current_run["activityId"]
+            )
+        except Exception as err:
+            print(f"⚠️ Could not fetch HR zones: {err}")
 
-    # 2. Read Incoming Photo & Automatically Fix Orientation
-    photo_bytes = await file.read()
-    raw_img = Image.open(io.BytesIO(photo_bytes))
-    base_img = ImageOps.exif_transpose(raw_img).convert("RGBA")
-    w, h = base_img.size
+    # 2. Process Avatar Photo (User Upload)
+    uploaded_avatar = None
+    if file is not None:
+        photo_bytes = await file.read()
+        raw_avatar = Image.open(io.BytesIO(photo_bytes))
+        uploaded_avatar = ImageOps.exif_transpose(raw_avatar).convert("RGBA")
 
-    # 3. Photo Color Enhancement & Grading
-    converter = ImageEnhance.Color(base_img)
-    enhanced = converter.enhance(1.25)
-
-    contrast = ImageEnhance.Contrast(enhanced)
-    enhanced = contrast.enhance(1.15)
-
-    sharpness = ImageEnhance.Sharpness(enhanced)
-    enhanced = sharpness.enhance(1.2)
-
-    # 4. Glassmorphism HUD Overlay
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
-    card_w = int(w * 0.9)
-    card_h = int(h * 0.16)
-    card_x = (w - card_w) // 2
-    card_y = h - card_h - int(h * 0.04)
-
-    corner_radius = int(card_h * 0.22)
-
-    draw.rounded_rectangle(
-        [(card_x, card_y), (card_x + card_w, card_y + card_h)],
-        radius=corner_radius,
-        fill=(15, 23, 42, 185),
-        outline=(255, 255, 255, 90),
-        width=2,
-    )
-
-    combined = Image.alpha_composite(enhanced, overlay)
-    draw_final = ImageDraw.Draw(combined)
-
-    # 5. Render Metrics
+    # 3. Fetch Dynamic Landscape Background (Picsum)
     try:
-        font_large = ImageFont.truetype("Helvetica", size=int(card_h * 0.38))
-        font_label = ImageFont.truetype("Helvetica", size=int(card_h * 0.13))
-    except Exception:
-        font_large = font_label = ImageFont.load_default()
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(DYNAMIC_NATURE_URL, timeout=10.0)
+            if resp.status_code == 200:
+                raw_bg = Image.open(io.BytesIO(resp.content))
+            else:
+                raise Exception(f"HTTP {resp.status_code}")
+    except Exception as err:
+        print(f"⚠️ Background download failed ({err}), fallback to dark default canvas.")
+        raw_bg = Image.new("RGB", (1080, 1920), color=(15, 23, 42))
 
-    col1_x = card_x + int(card_w * 0.08)
-    col1_y = card_y + int(card_h * 0.18)
+    base_bg = ImageOps.exif_transpose(raw_bg).convert("RGBA")
 
-    # Distance
-    draw_final.text(
-        (col1_x, col1_y), distance_km, fill=(255, 255, 255), font=font_large
-    )
-    draw_final.text(
-        (col1_x, col1_y + int(card_h * 0.48)),
-        "KILOMETERS",
-        fill=(0, 230, 153),
-        font=font_label,
-    )
+    # Background Enhancement
+    enhanced_bg = ImageEnhance.Color(base_bg).enhance(1.25)
+    enhanced_bg = ImageEnhance.Contrast(enhanced_bg).enhance(1.15)
+    enhanced_bg = ImageEnhance.Sharpness(enhanced_bg).enhance(1.2)
 
-    # Pace
-    col2_x = card_x + int(card_w * 0.42)
-    draw_final.text(
-        (col2_x, col1_y), pace_str, fill=(255, 255, 255), font=font_large
-    )
-    draw_final.text(
-        (col2_x, col1_y + int(card_h * 0.48)),
-        "AVG PACE (/KM)",
-        fill=(255, 180, 0),
-        font=font_label,
-    )
+    # 4. Template Rendering
+    if template == TemplateType.zone2:
+        final_img = render_zone2_garmin_style_template(
+            enhanced_bg, current_run, last_run, hr_zones_data, user_avatar=uploaded_avatar
+        )
+    else:
+        # Standard Fallback Overlay Rendering
+        w, h = enhanced_bg.size
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        card_w, card_h = int(w * 0.9), int(h * 0.16)
+        card_x, card_y = (w - card_w) // 2, h - card_h - int(h * 0.04)
 
-    # Heart Rate
-    col3_x = card_x + int(card_w * 0.72)
-    draw_final.text(
-        (col3_x, col1_y), avg_hr, fill=(255, 255, 255), font=font_large
-    )
-    draw_final.text(
-        (col3_x, col1_y + int(card_h * 0.48)),
-        "AVG HR (BPM)",
-        fill=(255, 70, 70),
-        font=font_label,
-    )
+        draw.rounded_rectangle(
+            [(card_x, card_y), (card_x + card_w, card_y + card_h)],
+            radius=int(card_h * 0.22),
+            fill=(15, 23, 42, 185),
+            outline=(255, 255, 255, 90),
+            width=2,
+        )
 
-    # 6. Output Image Bytes back to Client
+        final_img = Image.alpha_composite(enhanced_bg, overlay)
+
     out_buffer = io.BytesIO()
-    combined.convert("RGB").save(out_buffer, format="PNG")
-
+    final_img.convert("RGB").save(out_buffer, format="PNG")
     return Response(content=out_buffer.getvalue(), media_type="image/png")
