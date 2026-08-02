@@ -1,3 +1,5 @@
+
+import base64
 import io
 import os
 from contextlib import asynccontextmanager
@@ -6,13 +8,44 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import Response
 from garminconnect import Garmin
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+import tarfile
 
 dotenv.load_dotenv()
 
 # Global Garmin client instance
 garmin_client = None
-TOKEN_DIR = os.path.expanduser("~/.garmin_tokens")
+# TOKEN_DIR = os.path.expanduser("~/.garmin_tokens")
 
+TOKEN_DIR = "/tmp/garmin_tokens"
+
+
+def restore_tokens_from_env():
+    """Extracts Base64-encoded session tokens from GARMIN_TOKENS_BASE64 into TOKEN_DIR."""
+    b64_str = os.getenv("GARMIN_TOKENS_BASE64")
+    if not b64_str:
+        return False
+
+    try:
+        compressed_data = base64.b64decode(b64_str)
+        buffer = io.BytesIO(compressed_data)
+        os.makedirs(TOKEN_DIR, exist_ok=True)
+
+        with tarfile.open(fileobj=buffer, mode="r:gz") as tar:
+            for member in tar.getmembers():
+                if member.isfile():
+                    filename = os.path.basename(member.name)
+                    dest_path = os.path.join(TOKEN_DIR, filename)
+                    with (
+                        tar.extractfile(member) as source,
+                        open(dest_path, "wb") as target,
+                    ):
+                        target.write(source.read())
+
+        print(f"📦 Successfully restored Garmin session tokens to {TOKEN_DIR}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to restore tokens from env: {e}")
+        return False
 
 def get_garmin_client():
     """Initializes Garmin connection using cached tokens if available."""
@@ -26,8 +59,11 @@ def get_garmin_client():
 
     client = Garmin(email, password, is_cn=False)
 
+    # Automatically unpack tokens from env if the token directory is missing/empty
+    if not os.path.exists(TOKEN_DIR) or not os.listdir(TOKEN_DIR):
+        restore_tokens_from_env()
+
     try:
-        # Try loading existing session tokens
         print("🔐 Attempting to log in using cached session tokens...")
         client.login(TOKEN_DIR)
         print("✅ Logged in successfully with cached tokens.")
@@ -37,7 +73,6 @@ def get_garmin_client():
         )
         try:
             client.login()
-            # Save new tokens for future requests
             os.makedirs(TOKEN_DIR, exist_ok=True)
             client.garth.dump(TOKEN_DIR)
             print(f"✅ Full login successful. Session saved to {TOKEN_DIR}")
