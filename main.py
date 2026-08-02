@@ -18,8 +18,7 @@ dotenv.load_dotenv()
 garmin_client = None
 TOKEN_DIR = "/tmp/garmin_tokens"
 
-# Dynamic Picsum Nature Background Endpoint
-DYNAMIC_NATURE_URL2 = "https://picsum.photos/1080/1920"
+# Dynamic Nature Background Endpoint
 DYNAMIC_NATURE_URL = "https://loremflickr.com/1080/1920/nature,landscape/all"
 
 
@@ -94,10 +93,10 @@ def get_garmin_client():
 
 
 def create_vertical_gradient(
-        width: int,
-        height: int,
-        top_color: tuple[int, int, int, int],
-        bottom_color: tuple[int, int, int, int],
+    width: int,
+    height: int,
+    top_color: tuple[int, int, int, int],
+    bottom_color: tuple[int, int, int, int],
 ) -> Image.Image:
     """Generates a vertical gradient overlay."""
     base = Image.new("RGBA", (width, height))
@@ -152,239 +151,126 @@ def render_zone2_garmin_style_template(
 ) -> Image.Image:
     target_w, target_h = 1080, 1920
 
-    # 1. Base Canvas (Dynamic Landscape Background)
+    # 1. Base Background Image (Fit to 9:16)
     bg = ImageOps.fit(base_img, (target_w, target_h), Image.Resampling.LANCZOS)
 
+    # Gradient overlay to soften high-brightness background photos slightly
     gradient_overlay = create_vertical_gradient(
         target_w,
         target_h,
-        top_color=(10, 12, 16, 60),
-        bottom_color=(5, 7, 10, 120),
+        top_color=(0, 0, 0, 100),
+        bottom_color=(5, 7, 10, 160),
     )
-
     canvas = Image.alpha_composite(bg.convert("RGBA"), gradient_overlay)
 
-    # 2. Transparent Overlay Layer
     overlay = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # Fonts
-    try:
-        font_title = ImageFont.truetype("Helvetica", size=36)
-        font_huge = ImageFont.truetype("Helvetica", size=60)
-        font_large_val = ImageFont.truetype("Helvetica", size=52)
-        font_med = ImageFont.truetype("Helvetica", size=28)
-        font_small = ImageFont.truetype("Helvetica", size=22)
-    except Exception:
-        font_title = font_huge = font_large_val = font_med = font_small = (
-            ImageFont.load_default()
-        )
+    # Shadow helper for maximum text legibility
+    def draw_text_with_shadow(
+            position, text, font, fill_color, shadow_color=(0, 0, 0, 240), offset=(2, 2), anchor=None
+    ):
+        x, y = position
+        draw.text((x + offset[0], y + offset[1]), text, font=font, fill=shadow_color, anchor=anchor)
+        draw.text((x, y), text, font=font, fill=fill_color, anchor=anchor)
 
-    # Metrics
+    # Appropriately sized fonts for 1080p
+    try:
+        font_title = ImageFont.truetype("Helvetica", size=42)
+        font_huge = ImageFont.truetype("Helvetica", size=72)
+        font_large_val = ImageFont.truetype("Helvetica", size=58)
+        font_med = ImageFont.truetype("Helvetica", size=32)
+        font_small = ImageFont.truetype("Helvetica", size=26)
+    except Exception:
+        font_title = font_huge = font_large_val = font_med = font_small = ImageFont.load_default()
+
+    # Data
     activity_name = current.get("activityName", "Running")
     distance_km = f"{round(current.get('distance', 0) / 1000, 2)} km"
-    duration_sec = current.get("duration", 3816)
-    dur_str = format_seconds_to_mmss(duration_sec)
+    dur_str = format_seconds_to_mmss(current.get("duration", 3816))
 
     avg_speed = current.get("averageSpeed", 0)
-    pace_str = "-- /km"
-    if avg_speed > 0:
-        sec = 1000 / avg_speed
-        pace_str = f"{int(sec // 60)}:{int(sec % 60):02d} /km"
+    pace_str = f"{int((1000 / avg_speed) // 60)}:{int((1000 / avg_speed) % 60):02d} /km" if avg_speed > 0 else "-- /km"
 
-    avg_hr = (
-        f"{int(current.get('averageHR', 0))}"
-        if current.get("averageHR")
-        else "--"
-    )
-    max_hr = (
-        f"{int(current.get('maxHR', 0))}" if current.get("maxHR") else "--"
-    )
+    avg_hr = f"{int(current.get('averageHR', 0))}" if current.get("averageHR") else "--"
+    max_hr = f"{int(current.get('maxHR', 0))}" if current.get("maxHR") else "--"
 
-    card_bg = (12, 14, 18, 150)
-    card_border = (255, 255, 255, 70)
+    # Darker fill behind cards so background image doesn't clash with text
+    card_bg = (10, 12, 16, 220)
+    card_border = (255, 255, 255, 120)
 
     text_primary = (255, 255, 255, 255)
-    text_secondary = (200, 210, 225, 255)
+    text_secondary = (210, 225, 245, 255)
 
-    # =============================================================
-    # SECTION 1: TOP CARD
-    # =============================================================
-    draw.rounded_rectangle(
-        [(40, 60), (target_w - 40, 380)],
-        radius=20,
-        fill=card_bg,
-        outline=card_border,
-        width=2,
-    )
-    draw.text((80, 95), activity_name, fill=text_secondary, font=font_title)
+    # Top Card
+    draw.rounded_rectangle([(40, 60), (target_w - 40, 380)], radius=24, fill=card_bg, outline=card_border, width=2)
+    draw_text_with_shadow((80, 95), activity_name, font_title, text_secondary)
 
-    # --- PERSONA AVATAR BADGE ---
-    avatar_size = 100
-    avatar_x, avatar_y = 80, 165
-
+    # Avatar
+    avatar_size = 120
+    avatar_x, avatar_y = 80, 180
     if user_avatar is not None:
-        # Crop uploaded persona photo into a round avatar
-        avatar_crop = ImageOps.fit(
-            user_avatar, (avatar_size, avatar_size), Image.Resampling.LANCZOS
-        )
+        avatar_crop = ImageOps.fit(user_avatar, (avatar_size, avatar_size), Image.Resampling.LANCZOS)
         mask = Image.new("L", (avatar_size, avatar_size), 0)
-        mask_draw = ImageDraw.Draw(mask)
-        mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
-
+        ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
         overlay.paste(avatar_crop, (avatar_x, avatar_y), mask)
-        draw.ellipse(
-            [(avatar_x, avatar_y), (avatar_x + avatar_size, avatar_y + avatar_size)],
-            outline=(255, 255, 255, 220),
-            width=3,
-        )
-    else:
-        # Fallback runner badge icon if no custom photo was uploaded
-        icon_box = [(avatar_x, avatar_y), (avatar_x + avatar_size, avatar_y + avatar_size)]
-        draw.ellipse(icon_box, fill=(255, 255, 255, 30), outline=(255, 255, 255, 120), width=2)
+        draw.ellipse([(avatar_x, avatar_y), (avatar_x + avatar_size, avatar_y + avatar_size)],
+                     outline=(255, 255, 255, 220), width=3)
 
-        accent_color = (245, 130, 32, 255)
-        # Runner Silhouette
-        draw.ellipse([(123, 180), (137, 194)], fill=accent_color)
-        draw.line([(130, 195), (122, 220)], fill=accent_color, width=5)
-        draw.line([(130, 202), (142, 212)], fill=accent_color, width=4)
-        draw.line([(130, 202), (118, 208)], fill=accent_color, width=4)
-        draw.line([(122, 220), (138, 242)], fill=accent_color, width=5)
-        draw.line([(122, 220), (110, 238)], fill=accent_color, width=5)
+    # Distance & Time/Pace
+    draw_text_with_shadow((230, 180), distance_km, font_huge, text_primary)
+    draw_text_with_shadow((230, 270), f"{dur_str} • {pace_str}", font_med, text_secondary)
 
-    # Metrics
-    draw.text((210, 175), distance_km, fill=text_primary, font=font_huge)
-    draw.text(
-        (210, 270), f"{dur_str} • {pace_str}", fill=text_secondary, font=font_med
-    )
+    # Mid Card (HR)
+    draw.rounded_rectangle([(40, 410), (target_w - 40, 680)], radius=24, fill=card_bg, outline=card_border, width=2)
+    draw_text_with_shadow((80, 450), f"{avg_hr} bpm", font_large_val, text_primary)
+    draw_text_with_shadow((80, 535), "Average", font_med, text_secondary)
+    draw_text_with_shadow((560, 450), f"{max_hr} bpm", font_large_val, text_primary)
+    draw_text_with_shadow((560, 535), "Maximum", font_med, text_secondary)
 
-    # =============================================================
-    # SECTION 2: MID CARD
-    # =============================================================
-    draw.rounded_rectangle(
-        [(40, 410), (target_w - 40, 680)],
-        radius=20,
-        fill=card_bg,
-        outline=card_border,
-        width=2,
-    )
-    draw.text((80, 450), f"{avg_hr} bpm", fill=text_primary, font=font_large_val)
-    draw.text((80, 530), "Average", fill=text_secondary, font=font_med)
+    # Bottom Card (HR Zones)
+    draw.rounded_rectangle([(40, 710), (target_w - 40, 1840)], radius=24, fill=card_bg, outline=card_border, width=2)
 
-    draw.text(
-        (560, 450), f"{max_hr} bpm", fill=text_primary, font=font_large_val
-    )
-    draw.text((560, 530), "Maximum", fill=text_secondary, font=font_med)
-
-    # =============================================================
-    # SECTION 3: BOTTOM CARD (HR ZONES)
-    # =============================================================
-    draw.rounded_rectangle(
-        [(40, 710), (target_w - 40, 1840)],
-        radius=20,
-        fill=card_bg,
-        outline=card_border,
-        width=2,
-    )
-
-    if not isinstance(hr_zones, list) or len(hr_zones) == 0:
-        parsed_zones = [
-            {"zoneNumber": 1, "secsInZone": 718, "zoneLowBoundary": 121, "zoneHighBoundary": 134},
-            {"zoneNumber": 2, "secsInZone": 2729, "zoneLowBoundary": 135, "zoneHighBoundary": 149},
-            {"zoneNumber": 3, "secsInZone": 186, "zoneLowBoundary": 150, "zoneHighBoundary": 163},
-            {"zoneNumber": 4, "secsInZone": 0, "zoneLowBoundary": 164, "zoneHighBoundary": 178},
-            {"zoneNumber": 5, "secsInZone": 0, "zoneLowBoundary": 178, "zoneHighBoundary": 0},
-        ]
-    else:
-        parsed_zones = hr_zones
+    parsed_zones = hr_zones if isinstance(hr_zones, list) and len(hr_zones) > 0 else [
+        {"zoneNumber": 1, "secsInZone": 718, "zoneLowBoundary": 121, "zoneHighBoundary": 134},
+        {"zoneNumber": 2, "secsInZone": 2729, "zoneLowBoundary": 135, "zoneHighBoundary": 149},
+        {"zoneNumber": 3, "secsInZone": 186, "zoneLowBoundary": 150, "zoneHighBoundary": 163},
+        {"zoneNumber": 4, "secsInZone": 0, "zoneLowBoundary": 164, "zoneHighBoundary": 178},
+        {"zoneNumber": 5, "secsInZone": 0, "zoneLowBoundary": 178, "zoneHighBoundary": 0},
+    ]
 
     total_secs = sum(safe_get_zone_seconds(z) for z in parsed_zones) or 1.0
-
-    zone_names = {
-        1: "Warm Up",
-        2: "Easy",
-        3: "Aerobic",
-        4: "Threshold",
-        5: "Maximum",
-    }
-    zone_colors = {
-        1: (240, 245, 250, 230),
-        2: (41, 121, 255, 230),
-        3: (56, 142, 60, 230),
-        4: (245, 124, 0, 230),
-        5: (211, 47, 47, 230),
-    }
-
-    zone_map = {}
-    for idx, z in enumerate(parsed_zones):
-        z_num = z.get("zoneNumber", idx + 1) if isinstance(z, dict) else idx + 1
-        zone_map[z_num] = z
+    zone_names = {1: "Warm Up", 2: "Easy", 3: "Aerobic", 4: "Threshold", 5: "Maximum"}
+    zone_colors = {1: (240, 245, 250, 240), 2: (41, 121, 255, 240), 3: (56, 142, 60, 240), 4: (245, 124, 0, 240),
+                   5: (211, 47, 47, 240)}
+    zone_map = {z.get("zoneNumber", idx + 1) if isinstance(z, dict) else idx + 1: z for idx, z in
+                enumerate(parsed_zones)}
 
     curr_y = 760
-
-    # Zone 5 -> Zone 1
     for z_num in range(5, 0, -1):
         z = zone_map.get(z_num, {})
-
         secs = safe_get_zone_seconds(z)
         pct = int(round((secs / total_secs) * 100)) if total_secs > 0 else 0
-        z_time_str = format_seconds_to_mmss(secs)
 
-        low_hr = z.get("zoneLowBoundary", z.get("lowHR", z.get("low", "")))
-        high_hr = z.get("zoneHighBoundary", z.get("highHR", z.get("high", "")))
+        low_hr, high_hr = z.get("zoneLowBoundary", ""), z.get("zoneHighBoundary", "")
         z_desc = zone_names.get(z_num, "")
+        range_str = f"{int(low_hr)} - {int(high_hr)} bpm • {z_desc}" if low_hr and high_hr and int(
+            high_hr) > 0 else z_desc
 
-        if z_num == 5:
-            range_str = f"> {int(low_hr)} bpm • {z_desc}" if low_hr else z_desc
-        elif low_hr and high_hr and int(high_hr) > 0:
-            range_str = f"{int(low_hr)} - {int(high_hr)} bpm • {z_desc}"
-        elif low_hr:
-            range_str = f">{int(low_hr)} bpm • {z_desc}"
-        else:
-            range_str = z_desc
+        draw_text_with_shadow((80, curr_y), f"Zone {z_num}", font_med, text_primary)
+        draw_text_with_shadow((220, curr_y + 4), range_str, font_small, text_secondary)
+        draw_text_with_shadow((target_w - 220, curr_y + 2), format_seconds_to_mmss(secs), font_med, text_primary,
+                              anchor="ra")
+        draw_text_with_shadow((target_w - 80, curr_y + 2), f"{pct}%", font_med, text_primary, anchor="ra")
 
-        draw.text(
-            (80, curr_y), f"Zone {z_num}", fill=text_primary, font=font_med
-        )
-        draw.text(
-            (210, curr_y + 4),
-            range_str,
-            fill=text_secondary,
-            font=font_small,
-        )
-
-        draw.text(
-            (target_w - 200, curr_y + 2),
-            z_time_str,
-            fill=text_primary,
-            font=font_med,
-            anchor="ra",
-        )
-        draw.text(
-            (target_w - 80, curr_y + 2),
-            f"{pct}%",
-            fill=text_primary,
-            font=font_med,
-            anchor="ra",
-        )
-
-        bar_y = curr_y + 50
-        bar_w = target_w - 160
-        draw.rounded_rectangle(
-            [(80, bar_y), (80 + bar_w, bar_y + 20)],
-            radius=10,
-            fill=(255, 255, 255, 40),
-        )
-
+        bar_y, bar_w = curr_y + 52, target_w - 160
+        draw.rounded_rectangle([(80, bar_y), (80 + bar_w, bar_y + 22)], radius=11, fill=(255, 255, 255, 50))
         fill_w = int(bar_w * (secs / total_secs))
         if fill_w > 0:
-            draw.rounded_rectangle(
-                [(80, bar_y), (80 + max(fill_w, 16), bar_y + 20)],
-                radius=10,
-                fill=zone_colors.get(z_num, (255, 255, 255, 230)),
-            )
+            draw.rounded_rectangle([(80, bar_y), (80 + max(fill_w, 16), bar_y + 22)], radius=11,
+                                   fill=zone_colors.get(z_num, (255, 255, 255, 240)))
 
-        curr_y += 130
+        curr_y += 190
 
     final_img = Image.alpha_composite(canvas, overlay)
     return final_img.convert("RGB")
@@ -410,13 +296,13 @@ def health_check():
 
 @app.post("/generate")
 async def generate_card(
-        file: UploadFile | None = File(
-            None, description="Optional custom profile/persona image file"
-        ),
-        template: TemplateType = Query(
-            default=TemplateType.glassmorphism,
-            description="Card layout template",
-        ),
+    file: UploadFile | None = File(
+        None, description="Optional custom profile/persona image file"
+    ),
+    template: TemplateType = Query(
+        default=TemplateType.glassmorphism,
+        description="Card layout template",
+    ),
 ):
     global garmin_client
 
@@ -457,7 +343,7 @@ async def generate_card(
         raw_avatar = Image.open(io.BytesIO(photo_bytes))
         uploaded_avatar = ImageOps.exif_transpose(raw_avatar).convert("RGBA")
 
-    # 3. Fetch Dynamic Landscape Background (Picsum)
+    # 3. Fetch Dynamic Landscape Background
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.get(DYNAMIC_NATURE_URL, timeout=10.0)
